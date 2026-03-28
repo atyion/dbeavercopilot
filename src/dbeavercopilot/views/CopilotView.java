@@ -2,8 +2,6 @@ package dbeavercopilot.views;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
@@ -23,14 +21,10 @@ import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.part.ViewPart;
 import org.jkiss.dbeaver.model.DBPDataSourceContainer;
-import org.jkiss.dbeaver.model.ai.AIAssistant;
 import org.jkiss.dbeaver.model.ai.AIAssistantResponse;
 import org.jkiss.dbeaver.model.ai.AICompletionSettings;
 import org.jkiss.dbeaver.model.ai.AIDatabaseScope;
 import org.jkiss.dbeaver.model.ai.AIMessage;
-import org.jkiss.dbeaver.model.ai.AIPromptGenerator;
-import org.jkiss.dbeaver.model.ai.engine.AIDatabaseContext;
-import org.jkiss.dbeaver.model.ai.registry.AIAssistantRegistry;
 import org.jkiss.dbeaver.model.app.DBPProject;
 import org.jkiss.dbeaver.model.app.DBPWorkspace;
 import org.jkiss.dbeaver.model.exec.DBCExecutionContext;
@@ -41,17 +35,14 @@ import org.jkiss.dbeaver.runtime.DBWorkbench;
 import org.jkiss.dbeaver.ui.ai.controls.ScopeSelectorControl;
 import org.jkiss.dbeaver.ui.editors.sql.SQLEditor;
 
-public class SampleView extends ViewPart {
+import dbeavercopilot.ai.ChatService;
 
-    public static final String ID = "dbeavercopilot.views.SampleView";
+public class CopilotView extends ViewPart {
 
-    private static final Pattern SQL_BLOCK = Pattern.compile("```sql\\s*\\n([\\s\\S]*?)```", Pattern.CASE_INSENSITIVE);
-    private static final String SYSTEM_PROMPT = """
-        You are a helpful database assistant integrated in DBeaver.
-        When you generate SQL queries, always wrap them in a ```sql ... ``` code block.
-        For general questions or explanations, answer in plain text.
-        Be concise and precise.
-        """;
+    public static final String ID = "dbeavercopilot.views.CopilotView";
+
+    private final ChatService chatService = new ChatService();
+    private final List<AIMessage> chatHistory = new ArrayList<>();
 
     private Composite parent;
     private Combo connectionCombo;
@@ -62,14 +53,12 @@ public class SampleView extends ViewPart {
     private Button send;
     private Button insertSql;
     private String lastSql = null;
-    private final List<AIMessage> chatHistory = new ArrayList<>();
 
     @Override
     public void createPartControl(Composite parent) {
         this.parent = parent;
         parent.setLayout(new GridLayout(1, false));
 
-        // Connection row
         Composite connRow = new Composite(parent, SWT.NONE);
         connRow.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
         connRow.setLayout(new GridLayout(3, false));
@@ -128,7 +117,6 @@ public class SampleView extends ViewPart {
             }
         }
 
-        // Pre-select active SQL editor's connection
         int selectIdx = 0;
         IEditorPart editor = PlatformUI.getWorkbench()
             .getActiveWorkbenchWindow().getActivePage().getActiveEditor();
@@ -154,7 +142,6 @@ public class SampleView extends ViewPart {
         DBPDataSourceContainer container = availableConnections.get(idx);
         if (!container.isConnected()) return;
 
-        // Get execution context from active SQL editor or default
         DBCExecutionContext executionContext = findEditorContext(container);
         if (executionContext == null) return;
 
@@ -165,18 +152,14 @@ public class SampleView extends ViewPart {
         if (scopeSelector != null && !scopeSelector.isDisposed()) {
             scopeSelector.setInput(logicalDataSource, executionContext);
         } else {
-            // Create scope selector below connection row, above history
-            // Insert before history widget — rebuild layout
             if (scopeSelector != null) scopeSelector.dispose();
             scopeSelector = new ScopeSelectorControl(parent, logicalDataSource, executionContext, settings);
             scopeSelector.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
-            // Move scope selector above history: it's the second child, history is third
             scopeSelector.moveAbove(history);
             parent.layout(true, true);
         }
     }
 
-    // Must be called from UI thread
     private DBCExecutionContext findEditorContext(DBPDataSourceContainer container) {
         IEditorPart editor = PlatformUI.getWorkbench()
             .getActiveWorkbenchWindow().getActivePage().getActiveEditor();
@@ -184,12 +167,6 @@ public class SampleView extends ViewPart {
                 && container.equals(sqlEditor.getDataSourceContainer())) {
             return sqlEditor.getExecutionContext();
         }
-        return null;
-    }
-
-    private String extractSql(String text) {
-        Matcher m = SQL_BLOCK.matcher(text);
-        if (m.find()) return m.group(1).trim();
         return null;
     }
 
@@ -230,7 +207,6 @@ public class SampleView extends ViewPart {
         chatHistory.add(AIMessage.userMessage(message));
         List<AIMessage> messageSnapshot = new ArrayList<>(chatHistory);
 
-        // Capture scope state on UI thread
         AIDatabaseScope scope = scopeSelector != null ? scopeSelector.getScope() : AIDatabaseScope.CURRENT_SCHEMA;
         DBSLogicalDataSource logicalDs = scopeSelector != null ? scopeSelector.getDataSource() : null;
         DBCExecutionContext execCtx = scopeSelector != null ? scopeSelector.getExecutionContext() : null;
@@ -239,38 +215,16 @@ public class SampleView extends ViewPart {
             @Override
             protected IStatus run(IProgressMonitor monitor) {
                 try {
-                    AIDatabaseContext dbContext = null;
-                    if (logicalDs != null && execCtx != null) {
-                        AIDatabaseContext.Builder builder = new AIDatabaseContext.Builder(logicalDs)
-                            .setScope(scope)
-                            .setExecutionContext(execCtx);
-
-                        if (scope == AIDatabaseScope.CUSTOM && scopeSelector != null) {
-                            List<DBSObject> entities = scopeSelector.getCustomEntities(new DefaultProgressMonitor(monitor));
-                            builder.setCustomEntities(entities);
-                        }
-                        dbContext = builder.build();
+                    List<DBSObject> customEntities = null;
+                    if (scope == AIDatabaseScope.CUSTOM && scopeSelector != null) {
+                        customEntities = scopeSelector.getCustomEntities(new DefaultProgressMonitor(monitor));
                     }
 
-                    DBPWorkspace workspace = DBWorkbench.getPlatform().getWorkspace();
-                    AIAssistant assistant = AIAssistantRegistry.getInstance().createAssistant(workspace);
-
-                    AIPromptGenerator promptGenerator = new AIPromptGenerator() {
-                        @Override
-                        public String generatorId() { return "dbeavercopilot.chat"; }
-                        @Override
-                        public String build(AIDatabaseContext context) { return SYSTEM_PROMPT; }
-                    };
-
-                    AIAssistantResponse response = assistant.generateText(
-                        new DefaultProgressMonitor(monitor),
-                        dbContext,
-                        promptGenerator,
-                        messageSnapshot
-                    );
+                    AIAssistantResponse response = chatService.send(
+                        monitor, messageSnapshot, scope, logicalDs, execCtx, customEntities);
 
                     String text = response.getText();
-                    String sql = extractSql(text);
+                    String sql = chatService.extractSql(text);
                     chatHistory.add(AIMessage.assistantMessage(text, null));
 
                     Display.getDefault().asyncExec(() -> {

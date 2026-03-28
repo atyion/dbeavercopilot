@@ -9,10 +9,10 @@
             id="dbeavercopilot">
       </category>
       <view
-            id="dbeavercopilot.views.SampleView"
+            id="dbeavercopilot.views.CopilotView"
             name="DB Copilot"
             icon="icons/dbeavercopilotlogo.png"
-            class="dbeavercopilot.views.SampleView"
+            class="dbeavercopilot.views.CopilotView"
             category="dbeavercopilot"
             inject="true">
       </view>
@@ -22,7 +22,7 @@
       <perspectiveExtension
             targetID="org.eclipse.jdt.ui.JavaPerspective">
          <view
-               id="dbeavercopilot.views.SampleView"
+               id="dbeavercopilot.views.CopilotView"
                relative="org.eclipse.ui.views.ProblemView"
                relationship="right"
                ratio="0.5">
