@@ -26,17 +26,11 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.part.ViewPart;
 import org.jkiss.dbeaver.model.DBPDataSourceContainer;
 import org.jkiss.dbeaver.model.ai.AIAssistantResponse;
-import org.jkiss.dbeaver.model.ai.AICompletionSettings;
-import org.jkiss.dbeaver.model.ai.AIDatabaseScope;
 import org.jkiss.dbeaver.model.ai.AIMessage;
 import org.jkiss.dbeaver.model.app.DBPProject;
 import org.jkiss.dbeaver.model.app.DBPWorkspace;
 import org.jkiss.dbeaver.model.exec.DBCExecutionContext;
-import org.jkiss.dbeaver.model.logical.DBSLogicalDataSource;
-import org.jkiss.dbeaver.model.runtime.DefaultProgressMonitor;
-import org.jkiss.dbeaver.model.struct.DBSObject;
 import org.jkiss.dbeaver.runtime.DBWorkbench;
-import org.jkiss.dbeaver.ui.ai.controls.ScopeSelectorControl;
 import org.jkiss.dbeaver.ui.editors.sql.SQLEditor;
 
 import dbeavercopilot.ai.ChatService;
@@ -50,7 +44,6 @@ public class CopilotView extends ViewPart {
 
     private Composite parent;
     private Combo connectionCombo;
-    private ScopeSelectorControl scopeSelector;
     private List<DBPDataSourceContainer> availableConnections = new ArrayList<>();
 
     private StyledText chatDisplay;
@@ -73,7 +66,6 @@ public class CopilotView extends ViewPart {
         new Label(connRow, SWT.NONE).setText("Connection:");
         connectionCombo = new Combo(connRow, SWT.DROP_DOWN | SWT.READ_ONLY);
         connectionCombo.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
-        connectionCombo.addListener(SWT.Selection, e -> refreshScopeSelector());
 
         Button refreshBtn = new Button(connRow, SWT.PUSH);
         refreshBtn.setText("Refresh");
@@ -85,7 +77,6 @@ public class CopilotView extends ViewPart {
         new Label(parent, SWT.SEPARATOR | SWT.HORIZONTAL)
             .setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
-        // Chat display — StyledText: no cursor, styled speaker names, bigger font
         chatDisplay = new StyledText(parent, SWT.MULTI | SWT.WRAP | SWT.V_SCROLL | SWT.READ_ONLY);
         chatDisplay.setEditable(false);
         chatDisplay.setCaret(null);
@@ -107,14 +98,12 @@ public class CopilotView extends ViewPart {
         new Label(parent, SWT.SEPARATOR | SWT.HORIZONTAL)
             .setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
-        // Insert SQL button (hidden until SQL is available)
         insertSql = new Button(parent, SWT.PUSH);
         insertSql.setText("Insert SQL into editor");
         insertSql.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
         insertSql.setVisible(false);
         insertSql.addListener(SWT.Selection, e -> insertSqlIntoEditor());
 
-        // Input row — bordered container so l'input sembra un campo "chat"
         Composite inputRow = new Composite(parent, SWT.BORDER);
         inputRow.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
         inputRow.setLayout(new GridLayout(3, false));
@@ -164,6 +153,19 @@ public class CopilotView extends ViewPart {
         scrollToBottom();
     }
 
+    private void appendExploreStep(String sql, String result) {
+        String truncatedResult = result.length() > 300 ? result.substring(0, 300) + "..." : result;
+        String line = "  > " + sql.replaceAll("\\s+", " ") + "\n  " + truncatedResult + "\n";
+        int start = chatDisplay.getCharCount();
+        chatDisplay.append(line);
+
+        StyleRange style = new StyleRange(start, line.length(), null, null);
+        style.fontStyle = SWT.ITALIC;
+        style.foreground = Display.getDefault().getSystemColor(SWT.COLOR_DARK_GRAY);
+        chatDisplay.setStyleRange(style);
+        scrollToBottom();
+    }
+
     private void appendError(String text) {
         int start = chatDisplay.getCharCount();
         String line = text + "\n\n";
@@ -179,7 +181,7 @@ public class CopilotView extends ViewPart {
         chatDisplay.setTopIndex(chatDisplay.getLineCount() - 1);
     }
 
-    // --- Connection / scope ---
+    // --- Connection ---
 
     private void loadConnections() {
         availableConnections.clear();
@@ -207,32 +209,6 @@ public class CopilotView extends ViewPart {
         }
         if (!availableConnections.isEmpty()) {
             connectionCombo.select(selectIdx);
-            refreshScopeSelector();
-        }
-    }
-
-    private void refreshScopeSelector() {
-        int idx = connectionCombo.getSelectionIndex();
-        if (idx < 0 || idx >= availableConnections.size()) return;
-
-        DBPDataSourceContainer container = availableConnections.get(idx);
-        if (!container.isConnected()) return;
-
-        DBCExecutionContext executionContext = findEditorContext(container);
-        if (executionContext == null) return;
-
-        DBSLogicalDataSource logicalDataSource =
-            DBSLogicalDataSource.createLogicalDataSource(container, executionContext);
-        AICompletionSettings settings = new AICompletionSettings(container);
-
-        if (scopeSelector != null && !scopeSelector.isDisposed()) {
-            scopeSelector.setInput(logicalDataSource, executionContext);
-        } else {
-            if (scopeSelector != null) scopeSelector.dispose();
-            scopeSelector = new ScopeSelectorControl(parent, logicalDataSource, executionContext, settings);
-            scopeSelector.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
-            scopeSelector.moveAbove(chatDisplay);
-            parent.layout(true, true);
         }
     }
 
@@ -274,6 +250,23 @@ public class CopilotView extends ViewPart {
         String message = input.getText().trim();
         if (message.isEmpty()) return;
 
+        int idx = connectionCombo.getSelectionIndex();
+        if (idx < 0 || idx >= availableConnections.size()) {
+            appendError("[No connection selected]");
+            return;
+        }
+        DBPDataSourceContainer container = availableConnections.get(idx);
+        if (!container.isConnected()) {
+            appendError("[Connection is not active]");
+            return;
+        }
+        DBCExecutionContext execCtx = findEditorContext(container);
+        if (execCtx == null) {
+            appendError("[No active SQL editor for this connection]");
+            return;
+        }
+        String dbType = container.getDriver().getName();
+
         appendUserMessage(message);
         input.setText("");
         input.setEnabled(false);
@@ -284,21 +277,17 @@ public class CopilotView extends ViewPart {
         chatHistory.add(AIMessage.userMessage(message));
         List<AIMessage> messageSnapshot = new ArrayList<>(chatHistory);
 
-        AIDatabaseScope scope = scopeSelector != null ? scopeSelector.getScope() : AIDatabaseScope.CURRENT_SCHEMA;
-        DBSLogicalDataSource logicalDs = scopeSelector != null ? scopeSelector.getDataSource() : null;
-        DBCExecutionContext execCtx = scopeSelector != null ? scopeSelector.getExecutionContext() : null;
-
         Job job = new Job("AI Chat") {
             @Override
             protected IStatus run(IProgressMonitor monitor) {
                 try {
-                    List<DBSObject> customEntities = null;
-                    if (scope == AIDatabaseScope.CUSTOM && scopeSelector != null) {
-                        customEntities = scopeSelector.getCustomEntities(new DefaultProgressMonitor(monitor));
-                    }
-
                     AIAssistantResponse response = chatService.send(
-                        monitor, messageSnapshot, scope, logicalDs, execCtx, customEntities);
+                        monitor, messageSnapshot, execCtx, dbType, container.getName(),
+                        (sql, result) -> Display.getDefault().asyncExec(() -> {
+                            if (!chatDisplay.isDisposed()) {
+                                appendExploreStep(sql, result);
+                            }
+                        }));
 
                     String text = response.getText();
                     String sql = chatService.extractSql(text);
