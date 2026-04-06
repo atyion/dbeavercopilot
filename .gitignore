@@ -2,6 +2,7 @@ bin/
 target/
 *.class
 *.jar
+!docs/**/*.jar
 .settings/
 .classpath
 .project

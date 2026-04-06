@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <site>
-   <feature url="features/dbeavercopilot.feature_0.1.0.qualifier.jar" id="dbeavercopilot.feature" version="0.1.0.qualifier"/>
+   <feature url="features/dbeavercopilot.feature_0.1.0.202604061409.jar" id="dbeavercopilot.feature" version="0.1.0.202604061409"/>
 </site>
