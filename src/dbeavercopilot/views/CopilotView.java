@@ -9,6 +9,7 @@ import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.text.TextSelection;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Font;
@@ -19,6 +20,9 @@ import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MessageBox;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.PlatformUI;
@@ -30,15 +34,24 @@ import org.jkiss.dbeaver.model.exec.DBCExecutionContext;
 import org.jkiss.dbeaver.ui.editors.sql.SQLEditor;
 
 import dbeavercopilot.ai.ChatService;
+import dbeavercopilot.chat.ChatMessage;
+import dbeavercopilot.chat.ChatSession;
+import dbeavercopilot.chat.ChatStore;
 
 public class CopilotView extends ViewPart {
 
     public static final String ID = "dbeavercopilot.views.CopilotView";
 
     private final ChatService chatService = new ChatService();
-    private final List<AIMessage> chatHistory = new ArrayList<>();
+    private final ChatStore   chatStore   = new ChatStore();
+
+    private final List<AIMessage>   chatHistory     = new ArrayList<>();
+    private final List<ChatSession> sessionHeaders  = new ArrayList<>();
+
+    private ChatSession currentSession = null;
 
     private Composite parent;
+    private org.eclipse.swt.widgets.List chatList;
     private StyledText chatDisplay;
     private Text input;
     private Button send;
@@ -51,7 +64,53 @@ public class CopilotView extends ViewPart {
         this.parent = parent;
         parent.setLayout(new GridLayout(1, false));
 
-        chatDisplay = new StyledText(parent, SWT.MULTI | SWT.WRAP | SWT.V_SCROLL | SWT.READ_ONLY);
+        SashForm sash = new SashForm(parent, SWT.HORIZONTAL);
+        sash.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+
+        // --- Left panel: chat history list ---
+        Composite leftPanel = new Composite(sash, SWT.NONE);
+        leftPanel.setLayout(new GridLayout(1, false));
+
+        chatList = new org.eclipse.swt.widgets.List(leftPanel, SWT.BORDER | SWT.V_SCROLL | SWT.SINGLE);
+        chatList.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        chatList.addListener(SWT.Selection, e -> {
+            int idx = chatList.getSelectionIndex();
+            if (idx >= 0 && idx < sessionHeaders.size()) {
+                ChatSession full = chatStore.load(sessionHeaders.get(idx).id);
+                if (full != null) loadSession(full);
+            }
+        });
+
+        Menu contextMenu = new Menu(chatList);
+        chatList.setMenu(contextMenu);
+        contextMenu.addListener(SWT.Show, e -> {
+            for (MenuItem item : contextMenu.getItems()) item.dispose();
+            int idx = chatList.getSelectionIndex();
+            if (idx < 0 || idx >= sessionHeaders.size()) return;
+
+            MenuItem deleteItem = new MenuItem(contextMenu, SWT.PUSH);
+            deleteItem.setText("Delete Session");
+            deleteItem.addListener(SWT.Selection, ev -> {
+                MessageBox confirm = new MessageBox(chatList.getShell(),
+                    SWT.ICON_QUESTION | SWT.YES | SWT.NO);
+                confirm.setText("Delete Session");
+                confirm.setMessage("Delete this chat session?\nThis cannot be undone.");
+                if (confirm.open() != SWT.YES) return;
+
+                ChatSession toDelete = sessionHeaders.get(idx);
+                chatStore.delete(toDelete.id);
+                if (currentSession != null && currentSession.id.equals(toDelete.id)) {
+                    startNewChat();
+                }
+                refreshChatList();
+            });
+        });
+
+        // --- Right panel: chat UI ---
+        Composite rightPanel = new Composite(sash, SWT.NONE);
+        rightPanel.setLayout(new GridLayout(1, false));
+
+        chatDisplay = new StyledText(rightPanel, SWT.MULTI | SWT.WRAP | SWT.V_SCROLL | SWT.READ_ONLY);
         chatDisplay.setEditable(false);
         chatDisplay.setCaret(null);
         chatDisplay.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
@@ -62,22 +121,20 @@ public class CopilotView extends ViewPart {
         chatDisplay.setLineSpacing(3);
 
         FontData[] fontData = chatDisplay.getFont().getFontData();
-        for (FontData fd : fontData) {
-            fd.setHeight(fd.getHeight() + 1);
-        }
+        for (FontData fd : fontData) fd.setHeight(fd.getHeight() + 1);
         chatFont = new Font(Display.getDefault(), fontData);
         chatDisplay.setFont(chatFont);
 
-        new Label(parent, SWT.SEPARATOR | SWT.HORIZONTAL)
+        new Label(rightPanel, SWT.SEPARATOR | SWT.HORIZONTAL)
             .setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
-        insertSql = new Button(parent, SWT.PUSH);
+        insertSql = new Button(rightPanel, SWT.PUSH);
         insertSql.setText("Insert SQL into editor");
         insertSql.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
         insertSql.setVisible(false);
         insertSql.addListener(SWT.Selection, e -> insertSqlIntoEditor());
 
-        Composite inputRow = new Composite(parent, SWT.BORDER);
+        Composite inputRow = new Composite(rightPanel, SWT.BORDER);
         inputRow.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
         inputRow.setLayout(new GridLayout(3, false));
 
@@ -91,13 +148,61 @@ public class CopilotView extends ViewPart {
         send.addListener(SWT.Selection, e -> sendMessage());
 
         Button clear = new Button(inputRow, SWT.PUSH);
-        clear.setText("Clear");
-        clear.addListener(SWT.Selection, e -> {
-            chatHistory.clear();
-            chatDisplay.setText("");
-            insertSql.setVisible(false);
-            lastSql = null;
-        });
+        clear.setText("+");
+        clear.addListener(SWT.Selection, e -> startNewChat());
+
+        sash.setWeights(new int[]{220, 580});
+
+        refreshChatList();
+    }
+
+    // --- Session management ---
+
+    private void startNewChat() {
+        currentSession = null;
+        chatHistory.clear();
+        chatDisplay.setText("");
+        insertSql.setVisible(false);
+        lastSql = null;
+        chatList.deselectAll();
+    }
+
+    private void loadSession(ChatSession session) {
+        currentSession = session;
+        chatHistory.clear();
+        chatDisplay.setText("");
+        insertSql.setVisible(false);
+        lastSql = null;
+
+        for (ChatMessage m : session.messages) {
+            if ("user".equals(m.role)) {
+                appendUserMessage(m.text);
+                chatHistory.add(AIMessage.userMessage(m.text));
+            } else {
+                appendAssistantMessage(m.text);
+                chatHistory.add(AIMessage.assistantMessage(m.text, null));
+            }
+        }
+    }
+
+    private void refreshChatList() {
+        sessionHeaders.clear();
+        sessionHeaders.addAll(chatStore.loadHeaders());
+
+        chatList.removeAll();
+        for (ChatSession s : sessionHeaders) {
+            chatList.add(s.displayLabel());
+        }
+
+        // Re-select the current session if any
+        if (currentSession != null) {
+            for (int i = 0; i < sessionHeaders.size(); i++) {
+                if (sessionHeaders.get(i).id.equals(currentSession.id)) {
+                    chatList.select(i);
+                    break;
+                }
+            }
+        }
     }
 
     // --- Chat display helpers ---
@@ -201,6 +306,16 @@ public class CopilotView extends ViewPart {
         }
         String dbType = container.getDriver().getName();
 
+        // Create session on first message
+        if (currentSession == null) {
+            String title = message.length() > 40 ? message.substring(0, 40) + "..." : message;
+            currentSession = ChatSession.create(title, container.getName());
+        }
+
+        currentSession.messages.add(new ChatMessage("user", message));
+        chatStore.save(currentSession);
+        refreshChatList();
+
         appendUserMessage(message);
         input.setText("");
         input.setEnabled(false);
@@ -210,6 +325,7 @@ public class CopilotView extends ViewPart {
 
         chatHistory.add(AIMessage.userMessage(message));
         List<AIMessage> messageSnapshot = new ArrayList<>(chatHistory);
+        ChatSession sessionSnapshot = currentSession;
 
         Job job = new Job("AI Chat") {
             @Override
@@ -218,9 +334,7 @@ public class CopilotView extends ViewPart {
                     AIAssistantResponse response = chatService.send(
                         monitor, messageSnapshot, execCtx, dbType, container.getName(),
                         (sql, result) -> Display.getDefault().asyncExec(() -> {
-                            if (!chatDisplay.isDisposed()) {
-                                appendExploreStep(sql, result);
-                            }
+                            if (!chatDisplay.isDisposed()) appendExploreStep(sql, result);
                         }));
 
                     String text = response.getText();
@@ -228,25 +342,31 @@ public class CopilotView extends ViewPart {
                     chatHistory.add(AIMessage.assistantMessage(text, null));
 
                     Display.getDefault().asyncExec(() -> {
-                        if (!chatDisplay.isDisposed()) {
-                            appendAssistantMessage(text);
-                            if (sql != null) {
-                                lastSql = sql;
-                                insertSql.setVisible(true);
-                                parent.layout();
-                            }
-                            input.setEnabled(true);
-                            send.setEnabled(true);
-                            input.setFocus();
+                        if (chatDisplay.isDisposed()) return;
+                        appendAssistantMessage(text);
+
+                        // Save assistant reply (only if user hasn't switched session)
+                        if (currentSession != null && currentSession.id.equals(sessionSnapshot.id)) {
+                            currentSession.messages.add(new ChatMessage("assistant", text));
+                            chatStore.save(currentSession);
+                            refreshChatList();
                         }
+
+                        if (sql != null) {
+                            lastSql = sql;
+                            insertSql.setVisible(true);
+                            parent.layout();
+                        }
+                        input.setEnabled(true);
+                        send.setEnabled(true);
+                        input.setFocus();
                     });
                 } catch (Exception e) {
                     Display.getDefault().asyncExec(() -> {
-                        if (!chatDisplay.isDisposed()) {
-                            appendError("Error: " + e.getMessage());
-                            input.setEnabled(true);
-                            send.setEnabled(true);
-                        }
+                        if (chatDisplay.isDisposed()) return;
+                        appendError("Error: " + e.getMessage());
+                        input.setEnabled(true);
+                        send.setEnabled(true);
                     });
                 }
                 return Status.OK_STATUS;
@@ -257,9 +377,7 @@ public class CopilotView extends ViewPart {
 
     @Override
     public void dispose() {
-        if (chatFont != null && !chatFont.isDisposed()) {
-            chatFont.dispose();
-        }
+        if (chatFont != null && !chatFont.isDisposed()) chatFont.dispose();
         super.dispose();
     }
 
