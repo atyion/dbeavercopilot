@@ -51,7 +51,7 @@ public class ChatService {
             - Never confuse a schema name for a table name.
             - In information_schema queries always filter by BOTH table_schema and table_name when the user gives dot notation.
 
-            Example: user says "newfinv.richieste_massive" → table_schema = 'newfinv', table_name = 'richieste_massive'.
+            Example: user says "vehicles.cars" → table_schema = 'vehicles', table_name = 'cars'.
 
             You do NOT have the schema pre-loaded. Explore it yourself by writing SELECT queries
             on information_schema tables, wrapped in <explore> tags:
