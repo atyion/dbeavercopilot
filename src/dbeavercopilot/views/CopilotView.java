@@ -16,7 +16,6 @@ import org.eclipse.swt.graphics.FontData;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
-import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
@@ -27,10 +26,7 @@ import org.eclipse.ui.part.ViewPart;
 import org.jkiss.dbeaver.model.DBPDataSourceContainer;
 import org.jkiss.dbeaver.model.ai.AIAssistantResponse;
 import org.jkiss.dbeaver.model.ai.AIMessage;
-import org.jkiss.dbeaver.model.app.DBPProject;
-import org.jkiss.dbeaver.model.app.DBPWorkspace;
 import org.jkiss.dbeaver.model.exec.DBCExecutionContext;
-import org.jkiss.dbeaver.runtime.DBWorkbench;
 import org.jkiss.dbeaver.ui.editors.sql.SQLEditor;
 
 import dbeavercopilot.ai.ChatService;
@@ -43,9 +39,6 @@ public class CopilotView extends ViewPart {
     private final List<AIMessage> chatHistory = new ArrayList<>();
 
     private Composite parent;
-    private Combo connectionCombo;
-    private List<DBPDataSourceContainer> availableConnections = new ArrayList<>();
-
     private StyledText chatDisplay;
     private Text input;
     private Button send;
@@ -57,25 +50,6 @@ public class CopilotView extends ViewPart {
     public void createPartControl(Composite parent) {
         this.parent = parent;
         parent.setLayout(new GridLayout(1, false));
-
-        // Connection row
-        Composite connRow = new Composite(parent, SWT.NONE);
-        connRow.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
-        connRow.setLayout(new GridLayout(3, false));
-
-        new Label(connRow, SWT.NONE).setText("Connection:");
-        connectionCombo = new Combo(connRow, SWT.DROP_DOWN | SWT.READ_ONLY);
-        connectionCombo.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
-
-        Button refreshBtn = new Button(connRow, SWT.PUSH);
-        refreshBtn.setText("Refresh");
-        refreshBtn.addListener(SWT.Selection, e -> loadConnections());
-
-        loadConnections();
-
-        // Separator
-        new Label(parent, SWT.SEPARATOR | SWT.HORIZONTAL)
-            .setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
         chatDisplay = new StyledText(parent, SWT.MULTI | SWT.WRAP | SWT.V_SCROLL | SWT.READ_ONLY);
         chatDisplay.setEditable(false);
@@ -94,7 +68,6 @@ public class CopilotView extends ViewPart {
         chatFont = new Font(Display.getDefault(), fontData);
         chatDisplay.setFont(chatFont);
 
-        // Separator
         new Label(parent, SWT.SEPARATOR | SWT.HORIZONTAL)
             .setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
@@ -181,47 +154,6 @@ public class CopilotView extends ViewPart {
         chatDisplay.setTopIndex(chatDisplay.getLineCount() - 1);
     }
 
-    // --- Connection ---
-
-    private void loadConnections() {
-        availableConnections.clear();
-        connectionCombo.removeAll();
-
-        DBPWorkspace workspace = DBWorkbench.getPlatform().getWorkspace();
-        for (DBPProject project : workspace.getProjects()) {
-            for (DBPDataSourceContainer ds : project.getDataSourceRegistry().getDataSources()) {
-                availableConnections.add(ds);
-                connectionCombo.add(ds.getName() + (ds.isConnected() ? "" : " [disconnected]"));
-            }
-        }
-
-        int selectIdx = 0;
-        IEditorPart editor = PlatformUI.getWorkbench()
-            .getActiveWorkbenchWindow().getActivePage().getActiveEditor();
-        if (editor instanceof SQLEditor sqlEditor && sqlEditor.getDataSourceContainer() != null) {
-            String activeName = sqlEditor.getDataSourceContainer().getName();
-            for (int i = 0; i < availableConnections.size(); i++) {
-                if (availableConnections.get(i).getName().equals(activeName)) {
-                    selectIdx = i;
-                    break;
-                }
-            }
-        }
-        if (!availableConnections.isEmpty()) {
-            connectionCombo.select(selectIdx);
-        }
-    }
-
-    private DBCExecutionContext findEditorContext(DBPDataSourceContainer container) {
-        IEditorPart editor = PlatformUI.getWorkbench()
-            .getActiveWorkbenchWindow().getActivePage().getActiveEditor();
-        if (editor instanceof SQLEditor sqlEditor
-                && container.equals(sqlEditor.getDataSourceContainer())) {
-            return sqlEditor.getExecutionContext();
-        }
-        return null;
-    }
-
     // --- Actions ---
 
     private void insertSqlIntoEditor() {
@@ -250,19 +182,16 @@ public class CopilotView extends ViewPart {
         String message = input.getText().trim();
         if (message.isEmpty()) return;
 
-        int idx = connectionCombo.getSelectionIndex();
-        if (idx < 0 || idx >= availableConnections.size()) {
-            appendError("[No connection selected]");
+        IEditorPart editor = PlatformUI.getWorkbench()
+            .getActiveWorkbenchWindow().getActivePage().getActiveEditor();
+        if (!(editor instanceof SQLEditor sqlEditor)) {
+            appendError("[No active SQL editor]");
             return;
         }
-        DBPDataSourceContainer container = availableConnections.get(idx);
-        if (!container.isConnected()) {
+        DBCExecutionContext execCtx = sqlEditor.getExecutionContext();
+        DBPDataSourceContainer container = sqlEditor.getDataSourceContainer();
+        if (execCtx == null || container == null || !container.isConnected()) {
             appendError("[Connection is not active]");
-            return;
-        }
-        DBCExecutionContext execCtx = findEditorContext(container);
-        if (execCtx == null) {
-            appendError("[No active SQL editor for this connection]");
             return;
         }
         String dbType = container.getDriver().getName();
