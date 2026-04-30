@@ -104,8 +104,13 @@ public class CopilotView extends ViewPart {
 
     private void appendUserMessage(String text) {
         String header = "You\n";
+        int firstLine = chatDisplay.getLineCount() - 1;
         int start = chatDisplay.getCharCount();
         chatDisplay.append(header + text + "\n\n");
+        int addedLines = chatDisplay.getLineCount() - 1 - firstLine;
+        if (addedLines > 0) {
+            chatDisplay.setLineAlignment(firstLine, addedLines, SWT.RIGHT);
+        }
 
         StyleRange style = new StyleRange(start, header.length() - 1, null, null);
         style.fontStyle = SWT.BOLD;
